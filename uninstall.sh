@@ -13,19 +13,28 @@ read -p "Continue? [y/N] " -n 1 -r
 echo
 [[ ! $REPLY =~ ^[Yy]$ ]] && exit 0
 
+# Stop and remove ShadowTLS
+if systemctl is-active --quiet suiwarp-shadowtls 2>/dev/null; then
+  systemctl stop suiwarp-shadowtls
+  systemctl disable suiwarp-shadowtls
+  rm -f /etc/systemd/system/suiwarp-shadowtls.service
+  info "ShadowTLS service removed"
+fi
+rm -f /usr/local/bin/sing-box
+
 # Stop and remove wireproxy
 if systemctl is-active --quiet wireproxy-warp 2>/dev/null; then
   systemctl stop wireproxy-warp
   systemctl disable wireproxy-warp
   rm -f /etc/systemd/system/wireproxy-warp.service
-  systemctl daemon-reload
   info "wireproxy-warp service removed"
 fi
+systemctl daemon-reload
 rm -f /etc/wireproxy.conf
 rm -f /usr/local/bin/wireproxy
 rm -f /usr/local/bin/wgcf
 rm -rf /etc/suiwarp
-info "WARP config removed"
+info "WARP + ShadowTLS config removed"
 
 # Stop and remove S-UI
 if systemctl is-active --quiet s-ui 2>/dev/null; then
@@ -71,5 +80,6 @@ fi
 
 # Cleanup
 rm -f /root/suiwarp-client-links.txt
+rm -f /root/suiwarp-extra-links.txt
 
 info "SUIWARP uninstalled successfully"

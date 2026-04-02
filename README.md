@@ -25,7 +25,9 @@ Client ──→ Your Server (S-UI / sing-box)
                ├─ Hysteria2            :8443/udp  ← max speed
                ├─ VLESS Reality gRPC   :2053/tcp  ← multiplexed
                ├─ Trojan Reality       :8880/tcp  ← classic
-               └─ VLESS Reality WS     :2083/tcp  ← CDN compatible
+               ├─ VLESS Reality WS     :2083/tcp  ← CDN compatible
+               ├─ VLESS CDN WS         :2052/tcp  ← CF CDN relay (IP hidden)
+               └─ ShadowTLS v3+SS2022  :9443/tcp  ← anti-DPI (stealth)
                        │
                        ▼
              wireproxy (SOCKS5, ~4MB)
@@ -96,14 +98,29 @@ Import the links into your preferred client:
 | 4 | VLESS Reality gRPC | 2053/tcp | gRPC | Multiplexing (stable) |
 | 5 | Trojan Reality | 8880/tcp | TCP | Classic fallback |
 | 6 | VLESS Reality WS | 2083/tcp | WebSocket | CDN/firewall bypass |
+| 7 | **VLESS CDN WS** | 2052/tcp | WS + CF CDN | **IP hidden behind Cloudflare** |
+| 8 | **ShadowTLS v3 + SS2022** | 9443/tcp | ShadowTLS | **Anti-DPI, looks like normal TLS** |
+
+### CDN Relay (Protocol 7)
+
+Hides your server IP behind Cloudflare CDN. Even if the VPS IP is blocked, the CDN relay still works.
+
+**Setup:** Add a Cloudflare DNS A record pointing to your server (Proxied/orange cloud), then use the generated link with your CF domain.
+
+### ShadowTLS v3 (Protocol 8)
+
+Performs a **real TLS handshake** with a legitimate site (e.g., `www.microsoft.com`), making traffic indistinguishable from normal HTTPS. The most DPI-resistant protocol available.
+
+**Client:** Requires sing-box based clients (NekoBox, sing-box CLI). Config saved to `/root/suiwarp-extra-links.txt`.
 
 ## Resource Usage
 
 | Component | RAM | Description |
 |---|---|---|
-| S-UI (sing-box) | ~50MB | Panel + proxy core |
+| S-UI (sing-box) | ~50MB | Panel + 7 protocol inbounds |
+| sing-box (ShadowTLS) | ~6MB | Standalone ShadowTLS v3 |
 | wireproxy | ~4MB | WARP tunnel |
-| **Total** | **~54MB** | Fits on 512MB VPS |
+| **Total** | **~60MB** | Fits on 512MB VPS |
 
 ## Management
 
@@ -160,6 +177,8 @@ Instead, wireproxy runs a ~4MB process that tunnels traffic through Cloudflare W
 | 2053/tcp | TCP | VLESS Reality gRPC |
 | 8880/tcp | TCP | Trojan Reality |
 | 2083/tcp | TCP | VLESS Reality WS |
+| 2052/tcp | TCP | VLESS CDN WS (CF relay) |
+| 9443/tcp | TCP | ShadowTLS v3 + SS2022 |
 | 2095/tcp | TCP | S-UI Panel |
 | 2096/tcp | TCP | Subscription Server |
 

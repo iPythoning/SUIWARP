@@ -33,19 +33,24 @@ info "Server IP: $SERVER_IP"
 # ─── Configuration ───────────────────────────────────────────────────
 WGCF_VERSION="2.2.22"
 WIREPROXY_VERSION="1.0.9"
+SINGBOX_VERSION="1.13.5"
 S_UI_INSTALL_URL="https://raw.githubusercontent.com/alireza0/s-ui/master/install.sh"
 WIREPROXY_SOCKS_PORT=40000
 SWAP_SIZE="2G"
 SNI_TARGET="www.samsung.com"
+SHADOWTLS_PORT=9443
+SHADOWTLS_SNI="www.microsoft.com"
+CDN_WS_PORT=2052
+CDN_WS_PATH="/cdn-ws"
 
 # ─── Step 1: System dependencies ────────────────────────────────────
-step "1/7 Installing dependencies"
+step "1/9 Installing dependencies"
 apt-get update -qq
 apt-get install -y -qq curl wget sqlite3 jq ufw > /dev/null 2>&1
 info "Dependencies installed"
 
 # ─── Step 2: Swap (if not present) ──────────────────────────────────
-step "2/7 Configuring swap"
+step "2/9 Configuring swap"
 if [[ ! -f /swapfile ]]; then
   TOTAL_MEM_MB=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo)
   if [[ $TOTAL_MEM_MB -lt 4096 ]]; then
@@ -66,7 +71,7 @@ else
 fi
 
 # ─── Step 3: Install S-UI ───────────────────────────────────────────
-step "3/7 Installing S-UI"
+step "3/9 Installing S-UI"
 if systemctl is-active --quiet s-ui 2>/dev/null; then
   info "S-UI already running, skipping installation"
 else
@@ -85,7 +90,7 @@ S_UI_DB="/usr/local/s-ui/db/s-ui.db"
 [[ ! -f "$S_UI_DB" ]] && error "S-UI database not found at $S_UI_DB"
 
 # ─── Step 4: Generate Reality keypair & configure inbounds ──────────
-step "4/7 Configuring S-UI inbounds"
+step "4/9 Configuring S-UI inbounds"
 
 # Generate Reality keypair
 REALITY_OUTPUT=$(/usr/local/s-ui/sui generate reality-keypair 2>/dev/null || echo "")
@@ -341,7 +346,7 @@ conn.close()
 PYEOF
 
 # ─── Step 5: Install wireproxy + WARP ───────────────────────────────
-step "5/7 Setting up WARP via wireproxy"
+step "5/9 Setting up WARP via wireproxy"
 
 # Install wgcf
 if ! command -v wgcf &>/dev/null; then
@@ -435,7 +440,7 @@ else
 fi
 
 # ─── Step 6: Wire WARP into S-UI ────────────────────────────────────
-step "6/7 Connecting S-UI to WARP exit"
+step "6/9 Connecting S-UI to WARP exit"
 
 python3 << PYEOF
 import sqlite3, json
@@ -497,8 +502,126 @@ else
   warn "sing-box may need a moment to initialize"
 fi
 
-# ─── Step 7: Firewall ───────────────────────────────────────────────
-step "7/7 Configuring firewall"
+# ─── Step 7: CDN Relay (VLESS WS) ───────────────────────────────────
+step "7/9 Adding CDN relay inbound"
+
+python3 << PYEOF
+import sqlite3, json
+
+DB = "$S_UI_DB"
+conn = sqlite3.connect(DB)
+cur = conn.cursor()
+
+UUID = "$UUID"
+CDN_PORT = $CDN_WS_PORT
+CDN_PATH = "$CDN_WS_PATH"
+
+cur.execute("SELECT id FROM inbounds WHERE tag='vless-cdn-ws'")
+if not cur.fetchone():
+    cdn_out = {"server": "YOUR_CF_DOMAIN", "server_port": 443, "tag": "vless-cdn-ws", "type": "vless",
+        "tls": {"enabled": True, "server_name": "YOUR_CF_DOMAIN"},
+        "transport": {"type": "ws", "path": CDN_PATH, "headers": {"Host": "YOUR_CF_DOMAIN"}}}
+    cdn_opts = {"listen": "::", "listen_port": CDN_PORT, "multiplex": {},
+        "transport": {"type": "ws", "path": CDN_PATH}}
+    cur.execute("INSERT INTO inbounds (type, tag, tls_id, addrs, out_json, options) VALUES (?, ?, ?, ?, ?, ?)",
+        ("vless", "vless-cdn-ws", 0, json.dumps([]).encode(), json.dumps(cdn_out).encode(), json.dumps(cdn_opts).encode()))
+    print("Added CDN VLESS WS inbound on port " + str(CDN_PORT))
+
+    # Update client links
+    cur.execute("SELECT links FROM clients WHERE id=1")
+    d = cur.fetchone()[0]
+    if isinstance(d, bytes): d = d.decode()
+    links = json.loads(d)
+    links.append({"remark": "vless-cdn-ws", "type": "local",
+        "uri": f"vless://{UUID}@YOUR_CF_DOMAIN:443?security=tls&sni=YOUR_CF_DOMAIN&type=ws&path={CDN_PATH}&host=YOUR_CF_DOMAIN#vless-cdn-ws"})
+    cur.execute("UPDATE clients SET links=? WHERE id=1", (json.dumps(links).encode(),))
+else:
+    print("CDN inbound already exists")
+
+conn.commit()
+conn.close()
+PYEOF
+
+systemctl restart s-ui
+sleep 3
+info "CDN relay inbound ready on port ${CDN_WS_PORT}"
+info "To enable: add CF DNS A record pointing to ${SERVER_IP} (Proxied)"
+
+# ─── Step 8: ShadowTLS v3 ───────────────────────────────────────────
+step "8/9 Setting up ShadowTLS v3"
+
+# Install standalone sing-box for ShadowTLS
+if ! command -v sing-box &>/dev/null; then
+  curl -sL "https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VERSION}/sing-box-${SINGBOX_VERSION}-linux-${ARCH_SUFFIX}.tar.gz" \
+    -o /tmp/sing-box.tar.gz
+  tar -xzf /tmp/sing-box.tar.gz -C /tmp/
+  cp /tmp/sing-box-*/sing-box /usr/local/bin/sing-box
+  chmod +x /usr/local/bin/sing-box
+  rm -rf /tmp/sing-box*
+  info "sing-box ${SINGBOX_VERSION} installed"
+fi
+
+STLS_PASSWORD=$(openssl rand -hex 16)
+SS2022_KEY=$(openssl rand -base64 16)
+
+cat > /etc/suiwarp/shadowtls.json << STLSEOF
+{
+  "log": {"level": "warn"},
+  "inbounds": [
+    {
+      "type": "shadowtls", "tag": "shadowtls-in",
+      "listen": "::", "listen_port": ${SHADOWTLS_PORT},
+      "version": 3,
+      "users": [{"name": "default-user", "password": "${STLS_PASSWORD}"}],
+      "handshake": {"server": "${SHADOWTLS_SNI}", "server_port": 443},
+      "strict_mode": true, "detour": "ss2022-in"
+    },
+    {
+      "type": "shadowsocks", "tag": "ss2022-in",
+      "listen": "127.0.0.1",
+      "method": "2022-blake3-aes-128-gcm",
+      "password": "${SS2022_KEY}"
+    }
+  ],
+  "outbounds": [
+    {"type": "socks", "tag": "warp", "server": "127.0.0.1", "server_port": ${WIREPROXY_SOCKS_PORT}, "version": "5"},
+    {"type": "direct", "tag": "direct"}
+  ],
+  "route": {
+    "rules": [{"ip_is_private": true, "outbound": "direct"}],
+    "final": "warp"
+  }
+}
+STLSEOF
+
+cat > /etc/systemd/system/suiwarp-shadowtls.service << EOF
+[Unit]
+Description=SUIWARP ShadowTLS v3 (sing-box)
+After=network.target wireproxy-warp.service
+Wants=wireproxy-warp.service
+
+[Service]
+ExecStart=/usr/local/bin/sing-box run -c /etc/suiwarp/shadowtls.json
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable suiwarp-shadowtls
+systemctl restart suiwarp-shadowtls
+sleep 2
+
+if ss -tlnp | grep -q ":${SHADOWTLS_PORT}"; then
+  info "ShadowTLS v3 active on port ${SHADOWTLS_PORT}"
+else
+  warn "ShadowTLS may need a moment to start"
+fi
+
+# ─── Step 9: Firewall ───────────────────────────────────────────────
+step "9/9 Configuring firewall"
 
 # Detect SSH port
 SSH_PORT=$(ss -tlnp | grep sshd | awk '{print $4}' | grep -oP '\d+$' | head -1)
@@ -515,6 +638,8 @@ ufw allow 8443/udp comment "Hysteria2" > /dev/null 2>&1
 ufw allow 2053/tcp comment "VLESS-Reality-gRPC" > /dev/null 2>&1
 ufw allow 8880/tcp comment "Trojan-Reality" > /dev/null 2>&1
 ufw allow 2083/tcp comment "VLESS-Reality-WS" > /dev/null 2>&1
+ufw allow 2052/tcp comment "VLESS-CDN-WS" > /dev/null 2>&1
+ufw allow 9443/tcp comment "ShadowTLS-v3" > /dev/null 2>&1
 ufw allow 2095/tcp comment "S-UI-Panel" > /dev/null 2>&1
 ufw allow 2096/tcp comment "S-UI-Sub" > /dev/null 2>&1
 
@@ -566,11 +691,46 @@ ${BOLD}│${NC}    3. Hysteria2             :8443/udp                 ${BOLD}│
 ${BOLD}│${NC}    4. VLESS Reality gRPC    :2053/tcp                 ${BOLD}│${NC}
 ${BOLD}│${NC}    5. Trojan Reality        :8880/tcp                 ${BOLD}│${NC}
 ${BOLD}│${NC}    6. VLESS Reality WS      :2083/tcp                 ${BOLD}│${NC}
+${BOLD}│${NC}    7. VLESS CDN WS          :2052/tcp  (CF relay)     ${BOLD}│${NC}
+${BOLD}│${NC}    8. ShadowTLS v3 + SS2022 :9443/tcp  (anti-DPI)     ${BOLD}│${NC}
 ${BOLD}│${NC}                                                     ${BOLD}│${NC}
 ${BOLD}│${NC}  Client links: ${YELLOW}/root/suiwarp-client-links.txt${NC}
-${BOLD}│${NC}  Memory:       ${GREEN}~60MB total (S-UI + wireproxy)${NC}
+${BOLD}│${NC}  ShadowTLS:    ${YELLOW}/root/suiwarp-extra-links.txt${NC}
+${BOLD}│${NC}  Memory:       ${GREEN}~65MB total (S-UI + wireproxy + sing-box)${NC}
 ${BOLD}└─────────────────────────────────────────────────────┘${NC}
 "
 
+# Save ShadowTLS config info
+cat > /root/suiwarp-extra-links.txt << EXTRAEOF
+# SUIWARP Extra Protocols
+# ============================================
+
+## 7. CDN Relay (VLESS + WS + Cloudflare CDN)
+# Add CF DNS A record: your-domain -> ${SERVER_IP} (Proxied)
+# Then replace YOUR_CF_DOMAIN below:
+vless://${UUID}@YOUR_CF_DOMAIN:443?security=tls&sni=YOUR_CF_DOMAIN&type=ws&path=${CDN_WS_PATH}&host=YOUR_CF_DOMAIN#vless-cdn-ws
+
+## 8. ShadowTLS v3 + Shadowsocks 2022
+Server: ${SERVER_IP}:${SHADOWTLS_PORT}
+ShadowTLS Password: ${STLS_PASSWORD}
+ShadowTLS SNI: ${SHADOWTLS_SNI}
+SS Method: 2022-blake3-aes-128-gcm
+SS Password: ${SS2022_KEY}
+
+### sing-box client config:
+{
+  "outbounds": [
+    {"type": "shadowsocks", "tag": "ss-stls", "method": "2022-blake3-aes-128-gcm",
+     "password": "${SS2022_KEY}", "detour": "shadowtls-out",
+     "multiplex": {"enabled": true, "padding": true}},
+    {"type": "shadowtls", "tag": "shadowtls-out",
+     "server": "${SERVER_IP}", "server_port": ${SHADOWTLS_PORT},
+     "version": 3, "password": "${STLS_PASSWORD}",
+     "tls": {"enabled": true, "server_name": "${SHADOWTLS_SNI}"}}
+  ]
+}
+EXTRAEOF
+
 info "Client links saved to /root/suiwarp-client-links.txt"
+info "ShadowTLS config saved to /root/suiwarp-extra-links.txt"
 info "Change panel password: http://${SERVER_IP}:2095/app/"
