@@ -1,4 +1,4 @@
-# SUIWARP
+# S-UIWARP
 
 **S-UI + Cloudflare WARP in one command.** Deploy a multi-protocol proxy server with clean Cloudflare IP exit in under 2 minutes.
 
