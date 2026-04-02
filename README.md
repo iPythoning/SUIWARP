@@ -27,7 +27,9 @@ Client ──→ Your Server (S-UI / sing-box)
                ├─ Trojan Reality       :8880/tcp  ← classic
                ├─ VLESS Reality WS     :2083/tcp  ← CDN compatible
                ├─ VLESS CDN WS         :2052/tcp  ← CF CDN relay (IP hidden)
-               └─ ShadowTLS v3+SS2022  :9443/tcp  ← anti-DPI (stealth)
+               ├─ ShadowTLS v3+SS2022  :9443/tcp  ← anti-DPI (stealth)
+               ├─ VLESS HTTPUpgrade    :10443/tcp ← stealth HTTP
+               └─ Hysteria2 PortHop    :20000-40000/udp ← anti-QoS
                        │
                        ▼
              wireproxy (SOCKS5, ~4MB)
@@ -100,6 +102,8 @@ Import the links into your preferred client:
 | 6 | VLESS Reality WS | 2083/tcp | WebSocket | CDN/firewall bypass |
 | 7 | **VLESS CDN WS** | 2052/tcp | WS + CF CDN | **IP hidden behind Cloudflare** |
 | 8 | **ShadowTLS v3 + SS2022** | 9443/tcp | ShadowTLS | **Anti-DPI, looks like normal TLS** |
+| 9 | **VLESS HTTPUpgrade** | 10443/tcp | HTTPUpgrade + Reality | **Stealth HTTP, lighter than WS** |
+| 10 | **Hysteria2 Port Hopping** | 20000-40000/udp | QUIC | **Anti-QoS, port randomization** |
 
 ### CDN Relay (Protocol 7)
 
@@ -113,12 +117,24 @@ Performs a **real TLS handshake** with a legitimate site (e.g., `www.microsoft.c
 
 **Client:** Requires sing-box based clients (NekoBox, sing-box CLI). Config saved to `/root/suiwarp-extra-links.txt`.
 
+### VLESS HTTPUpgrade (Protocol 9)
+
+Lighter than WebSocket — uses HTTP Upgrade mechanism with Reality TLS. Lower overhead, harder to fingerprint than standard WS.
+
+### Hysteria2 Port Hopping (Protocol 10)
+
+Server uses iptables DNAT to redirect UDP ports 20000-40000 to the Hysteria2 listener. Client randomly hops between ports, defeating QoS throttling and port-based blocking.
+
+### ECH (Encrypted Client Hello)
+
+Cloudflare automatically enables ECH for proxied domains. When using CDN relay (Protocol 7) with `sw.your-domain.com`, SNI is encrypted end-to-end on supported clients (Chrome 130+, Firefox 128+). No server config needed.
+
 ## Resource Usage
 
 | Component | RAM | Description |
 |---|---|---|
-| S-UI (sing-box) | ~50MB | Panel + 7 protocol inbounds |
-| sing-box (ShadowTLS) | ~6MB | Standalone ShadowTLS v3 |
+| S-UI (sing-box) | ~50MB | Panel + 8 protocol inbounds |
+| sing-box (extra) | ~6MB | ShadowTLS v3 + HTTPUpgrade |
 | wireproxy | ~4MB | WARP tunnel |
 | **Total** | **~60MB** | Fits on 512MB VPS |
 
@@ -179,6 +195,8 @@ Instead, wireproxy runs a ~4MB process that tunnels traffic through Cloudflare W
 | 2083/tcp | TCP | VLESS Reality WS |
 | 2052/tcp | TCP | VLESS CDN WS (CF relay) |
 | 9443/tcp | TCP | ShadowTLS v3 + SS2022 |
+| 10443/tcp | TCP | VLESS HTTPUpgrade |
+| 20000-40000/udp | UDP | Hysteria2 Port Hopping |
 | 2095/tcp | TCP | S-UI Panel |
 | 2096/tcp | TCP | Subscription Server |
 

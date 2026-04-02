@@ -42,15 +42,19 @@ SHADOWTLS_PORT=9443
 SHADOWTLS_SNI="www.microsoft.com"
 CDN_WS_PORT=2052
 CDN_WS_PATH="/cdn-ws"
+HTTPUPGRADE_PORT=10443
+HTTPUPGRADE_SNI="www.apple.com"
+HTTPUPGRADE_PATH="/xhttp"
+HY2_HOP_RANGE="20000:40000"
 
 # ─── Step 1: System dependencies ────────────────────────────────────
-step "1/9 Installing dependencies"
+step "1/11 Installing dependencies"
 apt-get update -qq
 apt-get install -y -qq curl wget sqlite3 jq ufw > /dev/null 2>&1
 info "Dependencies installed"
 
 # ─── Step 2: Swap (if not present) ──────────────────────────────────
-step "2/9 Configuring swap"
+step "2/11 Configuring swap"
 if [[ ! -f /swapfile ]]; then
   TOTAL_MEM_MB=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo)
   if [[ $TOTAL_MEM_MB -lt 4096 ]]; then
@@ -71,7 +75,7 @@ else
 fi
 
 # ─── Step 3: Install S-UI ───────────────────────────────────────────
-step "3/9 Installing S-UI"
+step "3/11 Installing S-UI"
 if systemctl is-active --quiet s-ui 2>/dev/null; then
   info "S-UI already running, skipping installation"
 else
@@ -90,7 +94,7 @@ S_UI_DB="/usr/local/s-ui/db/s-ui.db"
 [[ ! -f "$S_UI_DB" ]] && error "S-UI database not found at $S_UI_DB"
 
 # ─── Step 4: Generate Reality keypair & configure inbounds ──────────
-step "4/9 Configuring S-UI inbounds"
+step "4/11 Configuring S-UI inbounds"
 
 # Generate Reality keypair
 REALITY_OUTPUT=$(/usr/local/s-ui/sui generate reality-keypair 2>/dev/null || echo "")
@@ -346,7 +350,7 @@ conn.close()
 PYEOF
 
 # ─── Step 5: Install wireproxy + WARP ───────────────────────────────
-step "5/9 Setting up WARP via wireproxy"
+step "5/11 Setting up WARP via wireproxy"
 
 # Install wgcf
 if ! command -v wgcf &>/dev/null; then
@@ -440,7 +444,7 @@ else
 fi
 
 # ─── Step 6: Wire WARP into S-UI ────────────────────────────────────
-step "6/9 Connecting S-UI to WARP exit"
+step "6/11 Connecting S-UI to WARP exit"
 
 python3 << PYEOF
 import sqlite3, json
@@ -503,7 +507,7 @@ else
 fi
 
 # ─── Step 7: CDN Relay (VLESS WS) ───────────────────────────────────
-step "7/9 Adding CDN relay inbound"
+step "7/11 Adding CDN relay inbound"
 
 python3 << PYEOF
 import sqlite3, json
@@ -548,7 +552,7 @@ info "CDN relay inbound ready on port ${CDN_WS_PORT}"
 info "To enable: add CF DNS A record pointing to ${SERVER_IP} (Proxied)"
 
 # ─── Step 8: ShadowTLS v3 ───────────────────────────────────────────
-step "8/9 Setting up ShadowTLS v3"
+step "8/11 Setting up ShadowTLS v3"
 
 # Install standalone sing-box for ShadowTLS
 if ! command -v sing-box &>/dev/null; then
@@ -620,8 +624,55 @@ else
   warn "ShadowTLS may need a moment to start"
 fi
 
-# ─── Step 9: Firewall ───────────────────────────────────────────────
-step "9/9 Configuring firewall"
+# ─── Step 9: VLESS HTTPUpgrade (stealth HTTP transport) ─────────────
+step "9/11 Adding VLESS HTTPUpgrade"
+
+# Add HTTPUpgrade inbound to the standalone sing-box config
+python3 << PYEOF
+import json
+with open("/etc/suiwarp/shadowtls.json") as f: cfg = json.load(f)
+# Check if already added
+tags = [ib["tag"] for ib in cfg["inbounds"]]
+if "vless-httpupgrade-in" not in tags:
+    cfg["inbounds"].append({
+        "type": "vless", "tag": "vless-httpupgrade-in",
+        "listen": "::", "listen_port": ${HTTPUPGRADE_PORT},
+        "users": [{"uuid": "${UUID}", "flow": ""}],
+        "tls": {"enabled": True, "server_name": "${HTTPUPGRADE_SNI}",
+                "reality": {"enabled": True,
+                            "handshake": {"server": "${HTTPUPGRADE_SNI}", "server_port": 443},
+                            "private_key": "${PRIVATE_KEY:-}",
+                            "short_id": ["${SHORT_ID}", ""]}},
+        "transport": {"type": "httpupgrade", "path": "${HTTPUPGRADE_PATH}", "host": "${HTTPUPGRADE_SNI}"}
+    })
+    with open("/etc/suiwarp/shadowtls.json", "w") as f: json.dump(cfg, f, indent=2)
+    print("Added HTTPUpgrade inbound")
+else:
+    print("HTTPUpgrade already configured")
+PYEOF
+
+systemctl restart suiwarp-shadowtls
+sleep 2
+info "VLESS HTTPUpgrade on port ${HTTPUPGRADE_PORT}"
+
+# ─── Step 10: Hysteria2 Port Hopping ────────────────────────────────
+step "10/11 Configuring Hysteria2 port hopping"
+
+# DNAT UDP port range to Hysteria2 port
+IFACE=$(ip route show default | awk '{print $5}' | head -1)
+if ! iptables -t nat -L PREROUTING -n 2>/dev/null | grep -q "8443"; then
+  iptables -t nat -A PREROUTING -i "$IFACE" -p udp --dport ${HY2_HOP_RANGE} -j DNAT --to-destination :8443
+  ip6tables -t nat -A PREROUTING -i "$IFACE" -p udp --dport ${HY2_HOP_RANGE} -j DNAT --to-destination :8443 2>/dev/null
+  mkdir -p /etc/iptables
+  iptables-save > /etc/iptables/rules.v4 2>/dev/null
+  ip6tables-save > /etc/iptables/rules.v6 2>/dev/null
+  info "Hysteria2 port hopping: UDP ${HY2_HOP_RANGE} → 8443"
+else
+  info "Port hopping DNAT already configured"
+fi
+
+# ─── Step 11: Firewall ──────────────────────────────────────────────
+step "11/11 Configuring firewall"
 
 # Detect SSH port
 SSH_PORT=$(ss -tlnp | grep sshd | awk '{print $4}' | grep -oP '\d+$' | head -1)
@@ -640,6 +691,8 @@ ufw allow 8880/tcp comment "Trojan-Reality" > /dev/null 2>&1
 ufw allow 2083/tcp comment "VLESS-Reality-WS" > /dev/null 2>&1
 ufw allow 2052/tcp comment "VLESS-CDN-WS" > /dev/null 2>&1
 ufw allow 9443/tcp comment "ShadowTLS-v3" > /dev/null 2>&1
+ufw allow 10443/tcp comment "VLESS-HTTPUpgrade" > /dev/null 2>&1
+ufw allow 20000:40000/udp comment "Hysteria2-PortHop" > /dev/null 2>&1
 ufw allow 2095/tcp comment "S-UI-Panel" > /dev/null 2>&1
 ufw allow 2096/tcp comment "S-UI-Sub" > /dev/null 2>&1
 
@@ -693,6 +746,8 @@ ${BOLD}│${NC}    5. Trojan Reality        :8880/tcp                 ${BOLD}│
 ${BOLD}│${NC}    6. VLESS Reality WS      :2083/tcp                 ${BOLD}│${NC}
 ${BOLD}│${NC}    7. VLESS CDN WS          :2052/tcp  (CF relay)     ${BOLD}│${NC}
 ${BOLD}│${NC}    8. ShadowTLS v3 + SS2022 :9443/tcp  (anti-DPI)     ${BOLD}│${NC}
+${BOLD}│${NC}    9. VLESS HTTPUpgrade     :10443/tcp (stealth)      ${BOLD}│${NC}
+${BOLD}│${NC}   10. Hysteria2 PortHop     :20000-40000/udp          ${BOLD}│${NC}
 ${BOLD}│${NC}                                                     ${BOLD}│${NC}
 ${BOLD}│${NC}  Client links: ${YELLOW}/root/suiwarp-client-links.txt${NC}
 ${BOLD}│${NC}  ShadowTLS:    ${YELLOW}/root/suiwarp-extra-links.txt${NC}

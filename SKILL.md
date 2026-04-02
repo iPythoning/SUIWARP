@@ -33,6 +33,8 @@ Client → S-UI (sing-box, 6 protocols) → wireproxy (SOCKS5 ~4MB) → Cloudfla
 | VLESS Reality WS | 2083/tcp | CDN/firewall bypass |
 | VLESS CDN WS | 2052/tcp | IP hidden behind Cloudflare CDN |
 | ShadowTLS v3 + SS2022 | 9443/tcp | Anti-DPI stealth (looks like real TLS) |
+| VLESS HTTPUpgrade | 10443/tcp | Stealth HTTP transport with Reality |
+| Hysteria2 Port Hopping | 20000-40000/udp | Anti-QoS, port randomization |
 
 ## Deployment
 
