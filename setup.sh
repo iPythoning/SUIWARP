@@ -30,6 +30,16 @@ SERVER_IP=$(curl -s --max-time 10 ifconfig.me || curl -s --max-time 10 icanhazip
 [[ -z "$SERVER_IP" ]] && error "Cannot detect public IP"
 info "Server IP: $SERVER_IP"
 
+# ─── Argument Parsing ────────────────────────────────────────────────
+# --no-warp / --residential: skip WARP, route traffic directly (for static residential IPs)
+SKIP_WARP=false
+for arg in "$@"; do
+  case "$arg" in
+    --no-warp|--residential|--direct) SKIP_WARP=true ;;
+  esac
+done
+[[ "$SKIP_WARP" == "true" ]] && info "Mode: Direct (residential IP — CF WARP disabled)"
+
 # ─── Configuration ───────────────────────────────────────────────────
 WGCF_VERSION="2.2.22"
 WIREPROXY_VERSION="1.0.9"
@@ -350,55 +360,56 @@ conn.close()
 PYEOF
 
 # ─── Step 5: Install wireproxy + WARP ───────────────────────────────
-step "5/11 Setting up WARP via wireproxy"
+if [[ "$SKIP_WARP" == "false" ]]; then
+  step "5/11 Setting up WARP via wireproxy"
 
-# Install wgcf
-if ! command -v wgcf &>/dev/null; then
-  curl -sL "https://github.com/ViRb3/wgcf/releases/download/v${WGCF_VERSION}/wgcf_${WGCF_VERSION}_linux_${ARCH_SUFFIX}" \
-    -o /usr/local/bin/wgcf
-  chmod +x /usr/local/bin/wgcf
-  info "wgcf installed"
-fi
+  # Install wgcf
+  if ! command -v wgcf &>/dev/null; then
+    curl -sL "https://github.com/ViRb3/wgcf/releases/download/v${WGCF_VERSION}/wgcf_${WGCF_VERSION}_linux_${ARCH_SUFFIX}" \
+      -o /usr/local/bin/wgcf
+    chmod +x /usr/local/bin/wgcf
+    info "wgcf installed"
+  fi
 
-# Install wireproxy
-if ! command -v wireproxy &>/dev/null; then
-  curl -sL "https://github.com/pufferffish/wireproxy/releases/download/v${WIREPROXY_VERSION}/wireproxy_linux_${ARCH_SUFFIX}.tar.gz" \
-    -o /tmp/wireproxy.tar.gz
-  tar -xzf /tmp/wireproxy.tar.gz -C /tmp/ wireproxy 2>/dev/null || true
-  mv /tmp/wireproxy /usr/local/bin/ 2>/dev/null || true
-  chmod +x /usr/local/bin/wireproxy
-  rm -f /tmp/wireproxy.tar.gz
-  info "wireproxy installed"
-fi
+  # Install wireproxy
+  if ! command -v wireproxy &>/dev/null; then
+    curl -sL "https://github.com/pufferffish/wireproxy/releases/download/v${WIREPROXY_VERSION}/wireproxy_linux_${ARCH_SUFFIX}.tar.gz" \
+      -o /tmp/wireproxy.tar.gz
+    tar -xzf /tmp/wireproxy.tar.gz -C /tmp/ wireproxy 2>/dev/null || true
+    mv /tmp/wireproxy /usr/local/bin/ 2>/dev/null || true
+    chmod +x /usr/local/bin/wireproxy
+    rm -f /tmp/wireproxy.tar.gz
+    info "wireproxy installed"
+  fi
 
-# Register WARP account
-WARP_DIR="/etc/suiwarp"
-mkdir -p "$WARP_DIR"
+  # Register WARP account
+  WARP_DIR="/etc/suiwarp"
+  mkdir -p "$WARP_DIR"
 
-if [[ ! -f "$WARP_DIR/wgcf-account.toml" ]]; then
-  cd "$WARP_DIR"
-  echo "y" | wgcf register --config "$WARP_DIR/wgcf-account.toml" 2>&1 | tail -5
-  info "WARP account registered"
-else
-  info "WARP account already exists"
-fi
+  if [[ ! -f "$WARP_DIR/wgcf-account.toml" ]]; then
+    cd "$WARP_DIR"
+    echo "y" | wgcf register --config "$WARP_DIR/wgcf-account.toml" 2>&1 | tail -5
+    info "WARP account registered"
+  else
+    info "WARP account already exists"
+  fi
 
-# Generate WireGuard profile
-if [[ ! -f "$WARP_DIR/wgcf-profile.conf" ]]; then
-  wgcf generate --config "$WARP_DIR/wgcf-account.toml" \
-    --profile "$WARP_DIR/wgcf-profile.conf" 2>&1 | tail -3
-  info "WireGuard profile generated"
-fi
+  # Generate WireGuard profile
+  if [[ ! -f "$WARP_DIR/wgcf-profile.conf" ]]; then
+    wgcf generate --config "$WARP_DIR/wgcf-account.toml" \
+      --profile "$WARP_DIR/wgcf-profile.conf" 2>&1 | tail -3
+    info "WireGuard profile generated"
+  fi
 
-# Extract WireGuard params
-WG_PRIVATE_KEY=$(grep 'PrivateKey' "$WARP_DIR/wgcf-profile.conf" | awk '{print $3}')
-WG_ADDRESS_V4=$(grep 'Address' "$WARP_DIR/wgcf-profile.conf" | head -1 | awk '{print $3}')
-WG_ADDRESS_V6=$(grep 'Address' "$WARP_DIR/wgcf-profile.conf" | tail -1 | awk '{print $3}')
-WG_PUBLIC_KEY=$(grep 'PublicKey' "$WARP_DIR/wgcf-profile.conf" | awk '{print $3}')
-WG_ENDPOINT=$(grep 'Endpoint' "$WARP_DIR/wgcf-profile.conf" | awk '{print $3}')
+  # Extract WireGuard params
+  WG_PRIVATE_KEY=$(grep 'PrivateKey' "$WARP_DIR/wgcf-profile.conf" | awk '{print $3}')
+  WG_ADDRESS_V4=$(grep 'Address' "$WARP_DIR/wgcf-profile.conf" | head -1 | awk '{print $3}')
+  WG_ADDRESS_V6=$(grep 'Address' "$WARP_DIR/wgcf-profile.conf" | tail -1 | awk '{print $3}')
+  WG_PUBLIC_KEY=$(grep 'PublicKey' "$WARP_DIR/wgcf-profile.conf" | awk '{print $3}')
+  WG_ENDPOINT=$(grep 'Endpoint' "$WARP_DIR/wgcf-profile.conf" | awk '{print $3}')
 
-# Create wireproxy config
-cat > /etc/wireproxy.conf << EOF
+  # Create wireproxy config
+  cat > /etc/wireproxy.conf << EOF
 [Interface]
 PrivateKey = ${WG_PRIVATE_KEY}
 Address = ${WG_ADDRESS_V4}
@@ -415,8 +426,8 @@ AllowedIPs = 0.0.0.0/0, ::/0
 BindAddress = 127.0.0.1:${WIREPROXY_SOCKS_PORT}
 EOF
 
-# Create systemd service
-cat > /etc/systemd/system/wireproxy-warp.service << EOF
+  # Create systemd service
+  cat > /etc/systemd/system/wireproxy-warp.service << EOF
 [Unit]
 Description=WireProxy WARP SOCKS5 Proxy
 After=network.target
@@ -430,23 +441,29 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF
 
-systemctl daemon-reload
-systemctl enable wireproxy-warp
-systemctl restart wireproxy-warp
-sleep 2
+  systemctl daemon-reload
+  systemctl enable wireproxy-warp
+  systemctl restart wireproxy-warp
+  sleep 2
 
-# Verify WARP connectivity
-WARP_IP=$(curl -s --max-time 10 -x socks5h://127.0.0.1:${WIREPROXY_SOCKS_PORT} ifconfig.me 2>/dev/null || echo "")
-if [[ -n "$WARP_IP" ]]; then
-  info "WARP active! Exit IP: $WARP_IP"
+  # Verify WARP connectivity
+  WARP_IP=$(curl -s --max-time 10 -x socks5h://127.0.0.1:${WIREPROXY_SOCKS_PORT} ifconfig.me 2>/dev/null || echo "")
+  if [[ -n "$WARP_IP" ]]; then
+    info "WARP active! Exit IP: $WARP_IP"
+  else
+    warn "WARP connection pending (may take a few seconds)"
+  fi
 else
-  warn "WARP connection pending (may take a few seconds)"
+  step "5/11 Skipping WARP (static residential IP — direct exit mode)"
+  mkdir -p /etc/suiwarp
+  info "WARP skipped: traffic will exit via server IP ${SERVER_IP}"
 fi
 
-# ─── Step 6: Wire WARP into S-UI ────────────────────────────────────
-step "6/11 Connecting S-UI to WARP exit"
+# ─── Step 6: Configure S-UI routing ─────────────────────────────────
+if [[ "$SKIP_WARP" == "false" ]]; then
+  step "6/11 Connecting S-UI to WARP exit"
 
-python3 << PYEOF
+  python3 << PYEOF
 import sqlite3, json
 
 DB = "$S_UI_DB"
@@ -486,14 +503,51 @@ config = {
 }
 cur.execute("UPDATE settings SET value=? WHERE key='config'",
             (json.dumps(config, indent=2),))
-
-# Fix timezone
 cur.execute("UPDATE settings SET value='UTC' WHERE key='timeLocation'")
-
 print("S-UI routing -> WARP configured")
 conn.commit()
 conn.close()
 PYEOF
+
+else
+  step "6/11 Configuring S-UI direct routing (residential IP)"
+
+  python3 << PYEOF
+import sqlite3, json
+
+DB = "$S_UI_DB"
+
+conn = sqlite3.connect(DB)
+cur = conn.cursor()
+
+# Direct routing — no WARP outbound needed
+config = {
+    "log": {"level": "warn"},
+    "dns": {
+        "servers": [
+            {"tag": "cloudflare", "address": "tls://1.1.1.1", "detour": "direct"},
+            {"tag": "google", "address": "tls://8.8.8.8", "detour": "direct"}
+        ],
+        "strategy": "prefer_ipv4"
+    },
+    "route": {
+        "rules": [
+            {"protocol": ["dns"], "action": "hijack-dns"},
+            {"ip_is_private": True, "outbound": "direct"}
+        ],
+        "final": "direct"
+    },
+    "experimental": {}
+}
+cur.execute("UPDATE settings SET value=? WHERE key='config'",
+            (json.dumps(config, indent=2),))
+cur.execute("UPDATE settings SET value='UTC' WHERE key='timeLocation'")
+print("S-UI routing -> direct configured (residential IP mode)")
+conn.commit()
+conn.close()
+PYEOF
+
+fi
 
 # Restart S-UI
 systemctl restart s-ui
@@ -568,6 +622,7 @@ fi
 STLS_PASSWORD=$(openssl rand -hex 16)
 SS2022_KEY=$(openssl rand -base64 16)
 
+if [[ "$SKIP_WARP" == "false" ]]; then
 cat > /etc/suiwarp/shadowtls.json << STLSEOF
 {
   "log": {"level": "warn"},
@@ -597,7 +652,38 @@ cat > /etc/suiwarp/shadowtls.json << STLSEOF
   }
 }
 STLSEOF
+else
+cat > /etc/suiwarp/shadowtls.json << STLSEOF
+{
+  "log": {"level": "warn"},
+  "inbounds": [
+    {
+      "type": "shadowtls", "tag": "shadowtls-in",
+      "listen": "::", "listen_port": ${SHADOWTLS_PORT},
+      "version": 3,
+      "users": [{"name": "default-user", "password": "${STLS_PASSWORD}"}],
+      "handshake": {"server": "${SHADOWTLS_SNI}", "server_port": 443},
+      "strict_mode": true, "detour": "ss2022-in"
+    },
+    {
+      "type": "shadowsocks", "tag": "ss2022-in",
+      "listen": "127.0.0.1",
+      "method": "2022-blake3-aes-128-gcm",
+      "password": "${SS2022_KEY}"
+    }
+  ],
+  "outbounds": [
+    {"type": "direct", "tag": "direct"}
+  ],
+  "route": {
+    "rules": [{"ip_is_private": true, "outbound": "direct"}],
+    "final": "direct"
+  }
+}
+STLSEOF
+fi
 
+if [[ "$SKIP_WARP" == "false" ]]; then
 cat > /etc/systemd/system/suiwarp-shadowtls.service << EOF
 [Unit]
 Description=SUIWARP ShadowTLS v3 (sing-box)
@@ -612,6 +698,21 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF
+else
+cat > /etc/systemd/system/suiwarp-shadowtls.service << EOF
+[Unit]
+Description=SUIWARP ShadowTLS v3 (sing-box)
+After=network.target
+
+[Service]
+ExecStart=/usr/local/bin/sing-box run -c /etc/suiwarp/shadowtls.json
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+fi
 
 systemctl daemon-reload
 systemctl enable suiwarp-shadowtls
@@ -702,15 +803,24 @@ info "Firewall configured (SSH:$SSH_PORT + all proxy ports)"
 # ─── Summary ─────────────────────────────────────────────────────────
 step "Setup Complete!"
 
-WARP_EXIT=$(curl -s --max-time 10 -x socks5h://127.0.0.1:${WIREPROXY_SOCKS_PORT} ifconfig.me 2>/dev/null || echo "pending")
-WARP_ORG=$(curl -s --max-time 10 -x socks5h://127.0.0.1:${WIREPROXY_SOCKS_PORT} "https://ipinfo.io/org" 2>/dev/null || echo "")
+if [[ "$SKIP_WARP" == "false" ]]; then
+  WARP_EXIT=$(curl -s --max-time 10 -x socks5h://127.0.0.1:${WIREPROXY_SOCKS_PORT} ifconfig.me 2>/dev/null || echo "pending")
+  WARP_ORG=$(curl -s --max-time 10 -x socks5h://127.0.0.1:${WIREPROXY_SOCKS_PORT} "https://ipinfo.io/org" 2>/dev/null || echo "")
+  EXIT_LABEL="WARP Exit"
+  EXIT_VALUE="${WARP_EXIT} (${WARP_ORG})"
+else
+  WARP_EXIT="$SERVER_IP"
+  WARP_ORG=""
+  EXIT_LABEL="Direct Exit"
+  EXIT_VALUE="${SERVER_IP} (residential — no WARP)"
+fi
 
 # Generate client links file
 cat > /root/suiwarp-client-links.txt << EOF
 # ============================================================
 # SUIWARP Client Links
 # Server: ${SERVER_IP}  |  SNI: ${SNI_TARGET}
-# WARP Exit: ${WARP_EXIT} (${WARP_ORG})
+# Exit: ${EXIT_VALUE}
 # ============================================================
 
 UUID:     ${UUID}
@@ -730,8 +840,7 @@ ${BOLD}┌───────────────────────�
 ${BOLD}│${NC}  ${GREEN}SUIWARP deployed successfully!${NC}                      ${BOLD}│${NC}
 ${BOLD}├─────────────────────────────────────────────────────┤${NC}
 ${BOLD}│${NC}  Server IP:   ${CYAN}${SERVER_IP}${NC}
-${BOLD}│${NC}  WARP Exit:   ${CYAN}${WARP_EXIT}${NC}
-${BOLD}│${NC}  WARP Org:    ${CYAN}${WARP_ORG}${NC}
+${BOLD}│${NC}  ${EXIT_LABEL}:  ${CYAN}${EXIT_VALUE}${NC}
 ${BOLD}│${NC}                                                     ${BOLD}│${NC}
 ${BOLD}│${NC}  Panel:       ${YELLOW}http://${SERVER_IP}:2095/app/${NC}
 ${BOLD}│${NC}  Sub URL:     ${YELLOW}http://${SERVER_IP}:2096/sub/${NC}
@@ -752,6 +861,7 @@ ${BOLD}│${NC}                                                     ${BOLD}│${
 ${BOLD}│${NC}  Client links: ${YELLOW}/root/suiwarp-client-links.txt${NC}
 ${BOLD}│${NC}  ShadowTLS:    ${YELLOW}/root/suiwarp-extra-links.txt${NC}
 ${BOLD}│${NC}  Memory:       ${GREEN}~65MB total (S-UI + wireproxy + sing-box)${NC}
+${BOLD}│${NC}  Mode:         ${GREEN}$( [[ "$SKIP_WARP" == "true" ]] && echo "Direct (residential IP)" || echo "WARP (CF exit)" )${NC}
 ${BOLD}└─────────────────────────────────────────────────────┘${NC}
 "
 

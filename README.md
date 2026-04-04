@@ -17,38 +17,45 @@ SUIWARP automates the entire setup of a production-ready proxy server:
 
 ## Architecture
 
+**Standard mode (WARP exit):**
 ```
 Client ──→ Your Server (S-UI / sing-box)
                │
-               ├─ VLESS Reality Vision  :443/tcp   ← daily driver
-               ├─ TUIC v5              :443/udp   ← low latency
-               ├─ Hysteria2            :8443/udp  ← max speed
-               ├─ VLESS Reality gRPC   :2053/tcp  ← multiplexed
-               ├─ Trojan Reality       :8880/tcp  ← classic
-               ├─ VLESS Reality WS     :2083/tcp  ← CDN compatible
-               ├─ VLESS CDN WS         :2052/tcp  ← CF CDN relay (IP hidden)
-               ├─ ShadowTLS v3+SS2022  :9443/tcp  ← anti-DPI (stealth)
+               ├─ VLESS Reality Vision  :443/tcp
+               ├─ TUIC v5              :443/udp
+               ├─ Hysteria2            :8443/udp
+               ├─ VLESS Reality gRPC   :2053/tcp
+               ├─ Trojan Reality       :8880/tcp
+               ├─ VLESS Reality WS     :2083/tcp
+               ├─ VLESS CDN WS         :2052/tcp  ← CF CDN relay
+               ├─ ShadowTLS v3+SS2022  :9443/tcp  ← anti-DPI
                ├─ VLESS HTTPUpgrade    :10443/tcp ← stealth HTTP
-               └─ Hysteria2 PortHop    :20000-40000/udp ← anti-QoS
+               └─ Hysteria2 PortHop    :20000-40000/udp
                        │
                        ▼
              wireproxy (SOCKS5, ~4MB)
                        │
                        ▼
-             Cloudflare WARP (free)
+             Cloudflare WARP → Exit IP: Cloudflare (AS13335)
+```
+
+**`--no-warp` mode (direct exit — for residential IPs):**
+```
+Client ──→ Your Server (S-UI / sing-box)
+               │
+               └─ [all protocols]
                        │
                        ▼
-             Exit IP: Cloudflare (AS13335)
+             Exit IP: Your server's residential IP (direct)
 ```
 
 ## Why WARP?
 
-| Without WARP | With WARP |
+| VPS/Datacenter | Residential IP (`--no-warp`) |
 |---|---|
-| VPS datacenter IP exposed | Cloudflare clean IP as exit |
-| IP easily flagged/blocked | High-reputation IP range |
-| Direct attribution to VPS | Traffic blends with Cloudflare CDN |
-| Single point of failure | Cloudflare's global network |
+| Datacenter IP easily flagged | Residential IP already clean |
+| Use WARP for Cloudflare exit | Skip WARP — exit directly |
+| +4MB RAM (wireproxy) | No wireproxy needed |
 
 ## Requirements
 
@@ -60,9 +67,17 @@ Client ──→ Your Server (S-UI / sing-box)
 
 ### 1. Deploy
 
+**Standard (WARP exit — for datacenter/VPS IPs):**
 ```bash
 bash <(curl -sL https://raw.githubusercontent.com/iPythoning/SUIWARP/main/setup.sh)
 ```
+
+**Direct exit — for static residential IPs (no WARP needed):**
+```bash
+bash <(curl -sL https://raw.githubusercontent.com/iPythoning/SUIWARP/main/setup.sh) --no-warp
+```
+
+> Use `--no-warp` when your server already has a clean residential IP. WARP is skipped entirely — traffic exits directly via your server IP, saving ~4MB RAM and a registration step.
 
 ### 2. Get Client Links
 
